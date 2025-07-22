@@ -11,15 +11,29 @@ st.set_page_config(layout="wide", page_title="Consulta de ITBI")
 st.title("🏡 Consulta de Guias de ITBI")
 st.markdown("Use os filtros abaixo para encontrar transações de imóveis e gerar relatórios.")
 
-# --- Caminhos dos Arquivos (AJUSTADO CONFORME SEU FEEDBACK) ---
-caminho_pkl = '/workspaces/codespaces-blank/data/dados_itbi_unificados.pkl'
+# --- Caminhos dos Arquivos (AJUSTADO PARA CAMINHOS RELATIVOS) ---
+# O script streamlit_app.py está na raiz do repositório.
+# A pasta 'data' está no mesmo nível.
+# Então, o caminho relativo é 'data/'.
+
+# Define o diretório base como o diretório onde o script está sendo executado
+BASE_DIR = os.path.dirname(__file__) 
+
+caminho_pkl = os.path.join(BASE_DIR, 'data', 'dados_itbi_unificados.pkl')
 arquivos_excel = {
-    2021: '/workspaces/codespaces-blank/data/GUIAS DE ITBI PAGAS (2021).xlsx',
-    2022: '/workspaces/codespaces-blank/data/GUIAS DE ITBI PAGAS (2022).xlsx',
-    2023: '/workspaces/codespaces-blank/data/GUIAS DE ITBI PAGAS (2023).xlsx',
-    2024: '/workspaces/codespaces-blank/data/GUIAS DE ITBI PAGAS (2024).xlsx',
-    2025: '/workspaces/codespaces-blank/data/GUIAS DE ITBI PAGAS (2025).xlsx',
+    2021: os.path.join(BASE_DIR, 'data', 'GUIAS DE ITBI PAGAS (2021).xlsx'),
+    2022: os.path.join(BASE_DIR, 'data', 'GUIAS DE ITBI PAGAS (2022).xlsx'),
+    2023: os.path.join(BASE_DIR, 'data', 'GUIAS DE ITBI PAGAS (2023).xlsx'),
+    2024: os.path.join(BASE_DIR, 'data', 'GUIAS DE ITBI PAGAS (2024).xlsx'),
+    2025: os.path.join(BASE_DIR, 'data', 'GUIAS DE ITBI PAGAS (2025).xlsx'),
 }
+colunas_desejadas_excel = [
+    'Nome do Logradouro', 'Número', 'Complemento',
+    'Valor de Transação (declarado pelo contribuinte)',
+    'Data de Transação', 'Área Construída (m2)'
+]
+abas_para_ignorar = ['LEGENDA', 'EXPLICAÇÕES', 'Tabela de USOS', 'Tabela de PADRÕES']
+
 colunas_desejadas_excel = [
     'Nome do Logradouro', 'Número', 'Complemento',
     'Valor de Transação (declarado pelo contribuinte)',
