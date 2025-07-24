@@ -4,6 +4,7 @@ import os
 import io
 import datetime
 from weasyprint import HTML as WeasyHTML
+import sqlite3 # Adicione esta importação
 
 # --- Configurações Iniciais do Streamlit ---
 st.set_page_config(layout="wide", page_title="Consulta de ITBI")
@@ -11,15 +12,16 @@ st.set_page_config(layout="wide", page_title="Consulta de ITBI")
 st.title("🏡 Consulta de Guias de ITBI")
 st.markdown("Use os filtros abaixo para encontrar transações de imóveis e gerar relatórios.")
 
-# --- Caminhos dos Arquivos (AJUSTADO PARA CAMINHOS RELATIVOS) ---
-# O script streamlit_app.py está na raiz do repositório.
-# A pasta 'data' está no mesmo nível.
-# Então, o caminho relativo é 'data/'.
-
+# --- Caminhos dos Arquivos ---
 # Define o diretório base como o diretório onde o script está sendo executado
 BASE_DIR = os.path.dirname(__file__) 
 
-caminho_pkl = os.path.join(BASE_DIR, 'data', 'dados_itbi_unificados.pkl')
+# NOVO: Caminho para o arquivo SQLite dos dados do ITBI
+caminho_itbi_db = os.path.join(BASE_DIR, 'data', 'dados_itbi_unificados.db')
+
+# Você pode remover a linha do caminho_pkl se quiser parar de usar PKL
+# caminho_pkl = os.path.join(BASE_DIR, 'data', 'dados_itbi_unificados.pkl') 
+
 arquivos_excel = {
     2021: os.path.join(BASE_DIR, 'data', 'GUIAS DE ITBI PAGAS (2021).xlsx'),
     2022: os.path.join(BASE_DIR, 'data', 'GUIAS DE ITBI PAGAS (2022).xlsx'),
@@ -30,18 +32,12 @@ arquivos_excel = {
 colunas_desejadas_excel = [
     'Nome do Logradouro', 'Número', 'Complemento',
     'Valor de Transação (declarado pelo contribuinte)',
-    'Data de Transação', 'Área Construída (m2)'
+    'Data de Transação', 'Área Construída (m2)',
+    'Proporção Transmitida (%)'
 ]
 abas_para_ignorar = ['LEGENDA', 'EXPLICAÇÕES', 'Tabela de USOS', 'Tabela de PADRÕES']
 
-colunas_desejadas_excel = [
-    'Nome do Logradouro', 'Número', 'Complemento',
-    'Valor de Transação (declarado pelo contribuinte)',
-    'Data de Transação', 'Área Construída (m2)'
-]
-abas_para_ignorar = ['LEGENDA', 'EXPLICAÇÕES', 'Tabela de USOS', 'Tabela de PADRÕES']
-
-# --- Função para Carregar Planilhas ---
+# --- Função para Carregar Planilhas (mantém-se a mesma) ---
 @st.cache_data
 def carregar_planilhas_excel(caminho_arquivo, colunas, abas_ignorar):
     """Carrega dados de um arquivo Excel, filtrando abas e colunas."""
@@ -65,20 +61,25 @@ def carregar_planilhas_excel(caminho_arquivo, colunas, abas_ignorar):
         st.error(f"Erro ao carregar o arquivo Excel '{caminho_arquivo}': {e}")
         return pd.DataFrame(columns=colunas)
 
+# --- Função Principal de Carregamento e Processamento (ALTERADA) ---
 @st.cache_data
 def carregar_e_processar_dados():
-    """Carrega dados de PKL ou Excel e os pré-processa."""
+    """Carrega dados de DB ou Excel e os pré-processa."""
     dados_carregados = pd.DataFrame()
     
-    if os.path.exists(caminho_pkl):
+    # Tenta carregar do SQLite DB primeiro
+    if os.path.exists(caminho_itbi_db):
         try:
-            dados_carregados = pd.read_pickle(caminho_pkl)
-            st.success("Dados carregados a partir do arquivo .pkl!")
+            conn = sqlite3.connect(caminho_itbi_db)
+            dados_carregados = pd.read_sql_query("SELECT * FROM itbi_data", conn)
+            conn.close()
+            st.success("Dados carregados a partir do arquivo .db!")
         except Exception as e:
-            st.warning(f"Erro ao carregar .pkl: {e}. Tentando carregar do Excel.")
+            st.warning(f"Erro ao carregar .db: {e}. Tentando carregar do Excel.")
     
-    if dados_carregados.empty:
-        st.info("Arquivo .pkl não encontrado ou com erro. Carregando as planilhas do Excel...")
+    # Se o DB não carregou ou deu erro, OU SEJA, se dados_carregados ainda está vazio, carrega do Excel
+    if dados_carregados.empty: # Este if agora lida com os dois cenários: DB não existe ou DB deu erro
+        st.info("Arquivo .db não encontrado ou com erro. Carregando as planilhas do Excel...")
         lista_dfs = []
         for ano, caminho_arquivo in arquivos_excel.items():
             if os.path.exists(caminho_arquivo):
@@ -91,21 +92,52 @@ def carregar_e_processar_dados():
         if lista_dfs:
             dados_carregados = pd.concat(lista_dfs, ignore_index=True)
             if not dados_carregados.empty:
+                # --- PRÉ-PROCESSAMENTO ANTES DE SALVAR NO DB ---
                 dados_carregados['Nome do Logradouro'] = dados_carregados['Nome do Logradouro'].astype(str).str.upper()
+                
+                # Filtrar Proporção Transmitida (%) antes de salvar no DB
+                dados_carregados['Proporção Transmitida (%)'] = pd.to_numeric(
+                    dados_carregados['Proporção Transmitida (%)'], errors='coerce'
+                )
+                dados_carregados = dados_carregados[
+                    dados_carregados['Proporção Transmitida (%)'] == 100
+                ].copy()
+                
+                # CONVERTER 'Data de Transação' PARA STRING E REMOVER 'Data de Transação Original' ANTES DE SALVAR
+                # Isso resolve o erro de Timestamp no SQLite
+                dados_carregados['Data de Transação'] = pd.to_datetime(dados_carregados['Data de Transação'], errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+                if 'Data de Transação Original' in dados_carregados.columns:
+                    dados_carregados = dados_carregados.drop(columns=['Data de Transação Original'])
+                # ---------------------------------------------------
+
+                # Tenta salvar no formato .db
                 try:
-                    os.makedirs(os.path.dirname(caminho_pkl), exist_ok=True)
-                    dados_carregados.to_pickle(caminho_pkl)
-                    st.success("Dados carregados do Excel e salvos no formato .pkl!")
+                    os.makedirs(os.path.dirname(caminho_itbi_db), exist_ok=True)
+                    conn = sqlite3.connect(caminho_itbi_db)
+                    dados_carregados.to_sql('itbi_data', conn, if_exists='replace', index=False)
+                    conn.close()
+                    st.success("Dados carregados do Excel, processados e salvos no formato .db!")
                 except Exception as e:
-                    st.warning(f"Não foi possível salvar o .pkl em {caminho_pkl}: {e}. O app continuará com os dados em memória.")
-            else:
+                    st.warning(f"Não foi possível salvar o .db em {caminho_itbi_db}: {e}. O app continuará com os dados em memória.")
+            else: # Este else pertence ao 'if not dados_carregados.empty:' do bloco de Excel
                 st.error("Nenhum arquivo Excel válido encontrado ou carregado. O DataFrame de dados está vazio.")
-        else:
-            st.error("Não foi possível carregar dados de PKL ou Excel. Verifique os caminhos e permissões.")
+        else: # Este else pertence ao 'if lista_dfs:'
+            st.error("Não foi possível carregar dados de Excel. Verifique os caminhos e permissões.")
     
+    # --- PÓS-PROCESSAMENTO FINAL (APLICADO SEMPRE QUE DADOS_CARREGADOS NÃO ESTIVER VAZIO) ---
+    # Este bloco é executado tanto se os dados vieram do DB quanto se vieram do Excel e foram processados
     if not dados_carregados.empty:
         dados_processados = dados_carregados.copy()
         
+        # O filtro de Proporção Transmitida (%) já foi aplicado antes de salvar no DB.
+        # Esta linha é redundante mas inofensiva se o DB já está filtrado.
+        dados_processados['Proporção Transmitida (%)'] = pd.to_numeric(
+            dados_processados['Proporção Transmitida (%)'], errors='coerce'
+        )
+        dados_processados = dados_processados[
+            dados_processados['Proporção Transmitida (%)'] == 100
+        ].copy()
+
         dados_processados['Número'] = pd.to_numeric(dados_processados['Número'], errors='coerce')
         dados_processados = dados_processados.dropna(subset=['Número']).copy()
         dados_processados['Número'] = dados_processados['Número'].astype(int)
@@ -119,11 +151,16 @@ def carregar_e_processar_dados():
         )
         dados_processados['Valor por m²'] = dados_processados['Valor por m²'].fillna(0)
         
+        # Re-criação da 'Data de Transação Original' e 'Data de Transação' para uso no aplicativo
+        # A coluna 'Data de Transação' que veio do DB está em 'YYYY-MM-DD HH:MM:SS',
+        # então precisamos convertê-la de volta para datetime para criar a 'Data de Transação Original'
+        # e depois formatar para exibição.
         dados_processados['Data de Transação Original'] = pd.to_datetime(dados_processados['Data de Transação'], errors='coerce')
         dados_processados['Data de Transação'] = dados_processados['Data de Transação Original'].dt.strftime('%d/%m/%Y').fillna('')
 
         return dados_processados
-    else:
+    else: # Este else pertence ao 'if not dados_carregados.empty:' do pós-processamento final
+        # Se dados_carregados estiver vazio aqui, significa que nada foi carregado do DB ou Excel.
         return pd.DataFrame()
 
 dados = carregar_e_processar_dados()
