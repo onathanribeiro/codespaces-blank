@@ -221,7 +221,7 @@ with col_dynamic_checkbox2:
     filtrar_area = st.checkbox("Filtrar por Área Construída (m²)?", key="filtrar_area_dynamic_checkbox")
 
 with st.form("busca_form"):
-    nome_rua = st.text_input("Nome da Rua:", help="Parte ou nome completo da rua.", key="nome_rua_input").upper()
+    nome_ruas = st.text_area("Nome das Ruas:", help="Digite uma rua por linha para buscar múltiplos endereços.", key="nome_rua_input").upper()
 
     col_num1, col_num2 = st.columns(2)
     with col_num1:
@@ -253,25 +253,35 @@ if submitted:
         
         df_filtrado_itbi = dados_itbi.copy()
         
-        nome_rua_valor = st.session_state.get('nome_rua_input', '')
-        if nome_rua_valor:
-            df_filtrado_itbi = df_filtrado_itbi[df_filtrado_itbi['Nome do Logradouro'].str.contains(nome_rua_valor, case=False, na=False)]
+        # LÓGICA DE FILTRO CORRIGIDA: Agora busca por contenção de strings
+        nome_ruas_valor = st.session_state.get('nome_rua_input', '')
+        lista_ruas = [rua.strip().upper() for rua in nome_ruas_valor.split('\n') if rua.strip()]
+        if lista_ruas:
+            # Construir uma máscara booleana para buscar por contenção de strings
+            # O '|' (OR) permite buscar por múltiplas strings
+            # O parâmetro na=False garante que valores NaN não causem erro
+            # O case=False garante que a busca seja insensível a maiúsculas/minúsculas
+            ruas_regex = '|'.join(lista_ruas)
+            df_filtrado_itbi = df_filtrado_itbi[df_filtrado_itbi['Nome do Logradouro'].str.contains(ruas_regex, na=False, case=False)]
 
         if st.session_state.get('busca_range_dynamic_checkbox', False):
             min_val = st.session_state.get('num_min_form', 0)
             max_val = st.session_state.get('num_max_form', 10000)
-            df_filtrado_itbi = df_filtrado_itbi[(df_filtrado_itbi['Número'] >= min_val) & (df_filtrado_itbi['Número'] <= max_val)]
+            if min_val > 0 or max_val < 10000:
+                df_filtrado_itbi = df_filtrado_itbi[(df_filtrado_itbi['Número'] >= min_val) & (df_filtrado_itbi['Número'] <= max_val)]
         else:
             exact_val = st.session_state.get('num_exato_form', 0)
-            df_filtrado_itbi = df_filtrado_itbi[df_filtrado_itbi['Número'] == exact_val]
+            if exact_val > 0: 
+                df_filtrado_itbi = df_filtrado_itbi[df_filtrado_itbi['Número'] == exact_val]
 
         if st.session_state.get('filtrar_area_dynamic_checkbox', False):
             min_area = st.session_state.get('area_min_form', 0.0)
             max_area = st.session_state.get('area_max_form', 5000.0)
-            df_filtrado_itbi = df_filtrado_itbi[(df_filtrado_itbi['Área Construída (m2)'] >= min_area) & (df_filtrado_itbi['Área Construída (m2)'] <= max_area)]
+            if min_area > 0.0 or max_area < 5000.0:
+                df_filtrado_itbi = df_filtrado_itbi[(df_filtrado_itbi['Área Construída (m2)'] >= min_area) & (df_filtrado_itbi['Área Construída (m2)'] <= max_area)]
 
         if df_filtrado_itbi.empty:
-            st.warning("Nenhum resultado de ITBI encontrado com os critérios de busca especificados.")
+            st.warning("Nenhum resultado de ITBI encontrado com os critérios de busca especificados. Por favor, verifique a ortografia do nome das ruas ou ajuste os filtros de número e área.")
             st.session_state.resultado_consulta_itbi = pd.DataFrame()
             st.session_state.df_para_exibir_formatado_itbi = pd.DataFrame()
         else:
@@ -476,8 +486,12 @@ if st.button("Calcular Valor Comparativo"):
             valor_m2_ref_comp_pdf = media_valor_m2_selecionado_itbi_pdf # Usa o valor armazenado
             valor_total_estimado_pdf = st.session_state.get('valor_comparativo_total_estimado', 0.0) # Usa o valor armazenado
 
+            # Prepara a lista de ruas para o PDF
+            lista_ruas_para_pdf = [rua.strip().upper() for rua in st.session_state.get('nome_rua_input', '').split('\n') if rua.strip()]
+            ruas_pesquisadas_pdf = ', '.join(lista_ruas_para_pdf) if lista_ruas_para_pdf else 'N/A'
+
             html_content = f"""
-            <!DOCTYPE html>
+            <!DOCTYPE inhtml>
             <html>
             <head>
                 <title>Relatório de Consulta ITBI - Itens Selecionados</title>
@@ -512,8 +526,8 @@ if st.button("Calcular Valor Comparativo"):
                 <p><strong>Data da Geração:</strong> {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
 
                 <h2>Parâmetros da Consulta</h2>
-                <p><strong>Nome da Rua Pesquisada:</strong> {st.session_state.get('nome_rua_input', 'N/A').upper()}</p>
-                <p><strong>Número da Busca:</strong> {"De " + str(st.session_state.get('num_min_form', 0)) + " a " + str(st.session_state.get('num_max_form', 10000)) if st.session_state.get('busca_range_dynamic_checkbox', False) else "Exato: " + str(st.session_state.get('num_exato_form', 0))}</p>
+                <p><strong>Ruas Pesquisadas:</strong> {ruas_pesquisadas_pdf}</p>
+                <p><strong>Número da Busca:</strong> {"De " + str(st.session_state.get('num_min_form', 0)) + " a " + str(st.session_state.get('num_max_form', 10000)) if st.session_state.get('busca_range_dynamic_checkbox', False) else "Exato: " + str(st.session_state.get('num_exato_form', 0)) if st.session_state.get('num_exato_form', 0) > 0 else "Não informado"}</p>
                 {"<p><strong>Área Construída (m²):</strong> De " + str(st.session_state.get('area_min_form', 0.0)) + " a " + str(st.session_state.get('area_max_form', 5000.0)) + "</p>" if st.session_state.get('filtrar_area_dynamic_checkbox', False) else ""}
 
                 <h2>Estatísticas dos Itens Selecionados</h2>
