@@ -14,15 +14,9 @@ st.markdown("Use os filtros abaixo para encontrar transações de ITBI e compara
 
 # --- Caminhos dos Arquivos ---
 BASE_DIR = os.path.dirname(__file__) 
-
-# Caminho para o arquivo SQLite dos dados do ITBI
 caminho_itbi_db = os.path.join(BASE_DIR, 'data', 'dados_itbi_unificados.db')
-
-# Caminho para o arquivo SQLite dos dados de imóveis (o reduzido)
 caminho_imoveis_reduzido_db = os.path.join(BASE_DIR, 'data', 'imoveis_sp_reduzido.db')
 
-
-# Configurações para carregar arquivos Excel (mantidas por compatibilidade, mas o foco é o DB)
 arquivos_excel = {
     2021: os.path.join(BASE_DIR, 'data', 'GUIAS DE ITBI PAGAS (2021).xlsx'),
     2022: os.path.join(BASE_DIR, 'data', 'GUIAS DE ITBI PAGAS (2022).xlsx'),
@@ -38,541 +32,230 @@ colunas_desejadas_excel = [
 ]
 abas_para_ignorar = ['LEGENDA', 'EXPLICAÇÕES', 'Tabela de USOS', 'Tabela de PADRÕES']
 
-# --- Função para Carregar Planilhas (mantém-se a mesma) ---
+# --- Funções de Carregamento e Processamento ---
+
 @st.cache_data
 def carregar_planilhas_excel(caminho_arquivo, colunas, abas_ignorar):
-    """Carrega dados de um arquivo Excel, filtrando abas e colunas."""
     try:
         todas_abas = pd.read_excel(caminho_arquivo, sheet_name=None)
         planilhas_validas = []
         for nome_aba, df in todas_abas.items():
-            if nome_aba in abas_ignorar:
-                continue
+            if nome_aba in abas_ignorar: continue
             if set(colunas).issubset(df.columns):
                 planilhas_validas.append(df[colunas])
-            else:
-                st.warning(f"Aba '{nome_aba}' em '{os.path.basename(caminho_arquivo)}' ignorada: faltam colunas essenciais.")
-        if planilhas_validas:
-            return pd.concat(planilhas_validas, ignore_index=True)
-        return pd.DataFrame(columns=colunas)
-    except FileNotFoundError:
-        st.error(f"Erro: Arquivo não encontrado em '{caminho_arquivo}'.")
-        return pd.DataFrame(columns=colunas)
-    except Exception as e:
-        st.error(f"Erro ao carregar o arquivo Excel '{caminho_arquivo}': {e}")
-        return pd.DataFrame(columns=colunas)
+        return pd.concat(planilhas_validas, ignore_index=True) if planilhas_validas else pd.DataFrame(columns=colunas)
+    except: return pd.DataFrame(columns=colunas)
 
-# --- Função Principal de Carregamento e Processamento de Dados de ITBI ---
 @st.cache_data
 def carregar_e_processar_dados_itbi():
-    """Carrega dados de ITBI de DB ou Excel e os pré-processa."""
     dados_carregados = pd.DataFrame()
-    
-    # Tenta carregar do SQLite DB primeiro
     if os.path.exists(caminho_itbi_db):
         try:
             conn = sqlite3.connect(caminho_itbi_db)
             dados_carregados = pd.read_sql_query("SELECT * FROM itbi_data", conn)
             conn.close()
             st.success("Dados de ITBI carregados a partir do arquivo .db!")
-        except Exception as e:
-            st.warning(f"Erro ao carregar DB de ITBI: {e}. Tentando carregar do Excel.")
+        except: pass
     
-    # Se o DB não carregou ou deu erro, OU SEJA, se dados_carregados ainda está vazio, carrega do Excel
     if dados_carregados.empty: 
-        st.info("Arquivo .db de ITBI não encontrado ou com erro. Carregando as planilhas do Excel...")
         lista_dfs = []
         for ano, caminho_arquivo in arquivos_excel.items():
             if os.path.exists(caminho_arquivo):
                 df_ano = carregar_planilhas_excel(caminho_arquivo, colunas_desejadas_excel, abas_para_ignorar)
-                if not df_ano.empty:
-                    lista_dfs.append(df_ano)
-            else:
-                st.warning(f"Aviso: Arquivo do ano {ano} não encontrado em {caminho_arquivo}. Verifique o caminho.")
+                if not df_ano.empty: lista_dfs.append(df_ano)
 
         if lista_dfs:
             dados_carregados = pd.concat(lista_dfs, ignore_index=True)
-            if not dados_carregados.empty:
-                # --- PRÉ-PROCESSAMENTO ANTES DE SALVAR NO DB ---
-                dados_carregados['Nome do Logradouro'] = dados_carregados['Nome do Logradouro'].astype(str).str.upper()
-                
-                dados_carregados['Proporção Transmitida (%)'] = pd.to_numeric(
-                    dados_carregados['Proporção Transmitida (%)'], errors='coerce'
-                )
-                dados_carregados = dados_carregados[
-                    dados_carregados['Proporção Transmitida (%)'] == 100
-                ].copy()
-                
-                dados_carregados['Data de Transação'] = pd.to_datetime(dados_carregados['Data de Transação'], errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
-                if 'Data de Transação Original' in dados_carregados.columns:
-                    dados_carregados = dados_carregados.drop(columns=['Data de Transação Original'])
+            dados_carregados['Nome do Logradouro'] = dados_carregados['Nome do Logradouro'].astype(str).str.upper()
+            dados_carregados['Proporção Transmitida (%)'] = pd.to_numeric(dados_carregados['Proporção Transmitida (%)'], errors='coerce')
+            dados_carregados = dados_carregados[dados_carregados['Proporção Transmitida (%)'] == 100].copy()
+            dados_carregados['Data de Transação'] = pd.to_datetime(dados_carregados['Data de Transação'], errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+            try:
+                os.makedirs(os.path.dirname(caminho_itbi_db), exist_ok=True)
+                conn = sqlite3.connect(caminho_itbi_db)
+                dados_carregados.to_sql('itbi_data', conn, if_exists='replace', index=False)
+                conn.close()
+            except: pass
 
-                try:
-                    os.makedirs(os.path.dirname(caminho_itbi_db), exist_ok=True)
-                    conn = sqlite3.connect(caminho_itbi_db)
-                    dados_carregados.to_sql('itbi_data', conn, if_exists='replace', index=False)
-                    conn.close()
-                    st.success("Dados de ITBI carregados do Excel, processados e salvos no formato .db!")
-                except Exception as e:
-                    st.warning(f"Não foi possível salvar o DB de ITBI em {caminho_itbi_db}: {e}. O app continuará com os dados em memória.")
-            else: 
-                st.error("Nenhum arquivo Excel válido encontrado ou carregado para ITBI. O DataFrame de dados está vazio.")
-        else:
-            st.error("Não foi possível carregar dados de ITBI do Excel. Verifique os caminhos e permissões.")
-    
-    # --- PÓS-PROCESSAMENTO FINAL DO ITBI ---
     if not dados_carregados.empty:
         dados_processados = dados_carregados.copy()
-        
-        dados_processados['Proporção Transmitida (%)'] = pd.to_numeric(
-            dados_processados['Proporção Transmitida (%)'], errors='coerce'
-        )
-        dados_processados = dados_processados[
-            dados_processados['Proporção Transmitida (%)'] == 100
-        ].copy()
-
-        dados_processados['Número'] = pd.to_numeric(dados_processados['Número'], errors='coerce')
-        dados_processados = dados_processados.dropna(subset=['Número']).copy()
-        dados_processados['Número'] = dados_processados['Número'].astype(int)
-        
+        dados_processados['Número'] = pd.to_numeric(dados_processados['Número'], errors='coerce').fillna(0).astype(int)
         dados_processados['Valor de Transação (declarado pelo contribuinte)'] = pd.to_numeric(dados_processados['Valor de Transação (declarado pelo contribuinte)'], errors='coerce')
         dados_processados['Área Construída (m2)'] = pd.to_numeric(dados_processados['Área Construída (m2)'], errors='coerce')
-        
-        dados_processados['Valor por m²'] = dados_processados.apply(
-            lambda row: row['Valor de Transação (declarado pelo contribuinte)'] / row['Área Construída (m2)'] if row['Área Construída (m2)'] > 0 else 0,
-            axis=1
-        )
-        dados_processados['Valor por m²'] = dados_processados['Valor por m²'].fillna(0)
-        
+        dados_processados['Valor por m²'] = dados_processados.apply(lambda row: row['Valor de Transação (declarado pelo contribuinte)'] / row['Área Construída (m2)'] if row['Área Construída (m2)'] > 0 else 0, axis=1)
         dados_processados['Data de Transação Original'] = pd.to_datetime(dados_processados['Data de Transação'], errors='coerce')
         dados_processados['Data de Transação'] = dados_processados['Data de Transação Original'].dt.strftime('%d/%m/%Y').fillna('')
-
         return dados_processados
-    else: 
-        return pd.DataFrame()
+    return pd.DataFrame()
 
-# NOVO: Função para buscar área construída no imoveis_sp_reduzido.db por logradouro, número e complemento
-@st.cache_data(ttl=3600) # Cacheia a conexão e o resultado por 1 hora
-def buscar_area_por_detalhes_endereco(logradouro_input, numero_input, complemento_input=""):
-    """
-    Busca a área construída no imoveis_sp_reduzido.db com base no logradouro, número e complemento.
-    Retorna a área ou None se não encontrada.
-    """
-    if not os.path.exists(caminho_imoveis_reduzido_db):
-        st.warning(f"Arquivo '{os.path.basename(caminho_imoveis_reduzido_db)}' não encontrado na pasta 'data/'. A busca por endereço não está disponível.")
-        return None
-
+@st.cache_data(ttl=3600)
+def buscar_opcoes_imoveis_por_endereco(logradouro_input, numero_input, complemento_input=""):
+    if not os.path.exists(caminho_imoveis_reduzido_db): return []
     try:
         conn = sqlite3.connect(caminho_imoveis_reduzido_db)
         cursor = conn.cursor()
+        t_log = logradouro_input.upper().strip()
+        t_num = int(numero_input)
+        t_compl = complemento_input.upper().strip() if complemento_input else ""
         
-        # Prepara os termos de busca, convertendo para maiúsculas e removendo espaços extras
-        termo_logradouro = logradouro_input.upper().strip()
-        termo_numero = int(numero_input) # Número deve ser exato
-        termo_complemento = complemento_input.upper().strip() if complemento_input else ""
-
-        # Construir a query SQL dinamicamente
-        query = "SELECT area_construida FROM imoveis_sp WHERE logradouro_nome LIKE ?"
-        params = [f"%{termo_logradouro}%"] # Busca parcial no logradouro
-
-        # Adicionar número se fornecido
-        if termo_numero > 0:
-            query += " AND numero_imovel = ?"
-            params.append(termo_numero)
-        
-        # Adicionar complemento se fornecido
-        if termo_complemento:
+        query = "SELECT complemento_imovel, area_construida FROM imoveis_sp WHERE logradouro_nome LIKE ? AND numero_imovel = ?"
+        params = [f"%{t_log}%", t_num]
+        if t_compl:
             query += " AND complemento_imovel LIKE ?"
-            params.append(f"%{termo_complemento}%") # Busca parcial no complemento
+            params.append(f"%{t_compl}%")
         
-        query += " LIMIT 1" # Limita a 1 resultado para pegar a primeira correspondência
-
         cursor.execute(query, params)
-        resultado = cursor.fetchone()
-        
+        res = cursor.fetchall()
         conn.close()
-        
-        if resultado:
-            area = float(resultado[0]) # Converte para float
-            return area
-        else:
-            return None
-    except Exception as e:
-        st.error(f"Erro ao buscar área no 'imoveis_sp_reduzido.db': {e}")
-        return None
+        return res
+    except: return []
 
-# Carrega os dados de ITBI no início
+# --- Inicialização ---
 dados_itbi = carregar_e_processar_dados_itbi()
+colunas_base_exibicao = ['Nome do Logradouro', 'Número', 'Complemento', 'Valor de Transação (declarado pelo contribuinte)', 'Data de Transação', 'Área Construída (m2)', 'Valor por m²']
 
-# Definir as colunas base para exibir
-colunas_base_exibicao = [
-    'Nome do Logradouro', 'Número', 'Complemento',
-    'Valor de Transação (declarado pelo contribuinte)',
-    'Data de Transação', 'Área Construída (m2)', 'Valor por m²'
-]
-
-# --- Interface de Busca (Streamlit) ---
+# --- Filtros ITBI ---
 st.header("🔍 Critérios de Busca (Dados de ITBI)")
-
-col_dynamic_checkbox1, col_dynamic_checkbox2 = st.columns(2)
-with col_dynamic_checkbox1:
-    busca_range = st.checkbox("Buscar por range de número?", key="busca_range_dynamic_checkbox")
-with col_dynamic_checkbox2:
-    filtrar_area = st.checkbox("Filtrar por Área Construída (m²)?", key="filtrar_area_dynamic_checkbox")
+col_cb1, col_cb2 = st.columns(2)
+with col_cb1: busca_range = st.checkbox("Buscar por range de número?", key="chk_range")
+with col_cb2: filtrar_area = st.checkbox("Filtrar por Área Construída (m²)?", key="chk_area")
 
 with st.form("busca_form"):
-    nome_ruas = st.text_area("Nome das Ruas:", help="Digite uma rua por linha para buscar múltiplos endereços.", key="nome_rua_input").upper()
-
-    col_num1, col_num2 = st.columns(2)
-    with col_num1:
-        if busca_range:
-            num_min = st.number_input("Número Mínimo:", min_value=0, value=st.session_state.get('num_min_input', 0), step=1, key="num_min_form")
-        else:
-            num_exato = st.number_input("Número Exato:", min_value=0, value=st.session_state.get('num_exato_input', 0), step=1, key="num_exato_form")
-    with col_num2:
-        if busca_range:
-            num_max = st.number_input("Número Máximo:", min_value=0, value=st.session_state.get('num_max', 10000), step=1, key="num_max_form")
+    nome_ruas = st.text_area("Nome das Ruas:", key="nome_rua_input").upper()
+    c_n1, c_n2 = st.columns(2)
+    with c_n1:
+        if busca_range: n_min = st.number_input("Número Mínimo:", value=0)
+        else: n_exato = st.number_input("Número Exato:", value=0)
+    with c_n2:
+        if busca_range: n_max = st.number_input("Número Máximo:", value=10000)
     
     if filtrar_area:
-        col_area1, col_area2 = st.columns(2)
-        with col_area1:
-            area_min = st.number_input("Área Mínima (m²):", min_value=0.0, value=st.session_state.get('area_min', 0.0), step=1.0, key="area_min_form")
-        with col_area2:
-            area_max = st.number_input("Área Máxima (m²):", min_value=0.0, value=st.session_state.get('area_max', 5000.0), step=1.0, key="area_max_form")
+        ca1, ca2 = st.columns(2)
+        with ca1: a_min = st.number_input("Área Mínima (m²):", value=0.0)
+        with ca2: a_max = st.number_input("Área Máxima (m²):", value=5000.0)
     
-    submitted = st.form_submit_button("Consultar ITBI")
+    btn_itbi = st.form_submit_button("Consultar ITBI")
 
-# --- Lógica de Consulta e Exibição de Resultados do ITBI ---
-if submitted:
-    if dados_itbi.empty:
-        st.error("Não há dados de ITBI carregados para realizar a consulta. Verifique os caminhos dos arquivos e o carregamento inicial.")
-        st.session_state.resultado_consulta_itbi = pd.DataFrame()
-        st.session_state.df_para_exibir_formatado_itbi = pd.DataFrame()
-    else:
-        st.subheader("📊 Resultados da Consulta de ITBI")
+if btn_itbi:
+    if not dados_itbi.empty:
+        df_f = dados_itbi.copy()
+        l_ruas = [r.strip().upper() for r in nome_ruas.split('\n') if r.strip()]
+        if l_ruas:
+            df_f = df_f[df_f['Nome do Logradouro'].str.contains('|'.join(l_ruas), na=False, case=False)]
+        if busca_range:
+            df_f = df_f[(df_f['Número'] >= n_min) & (df_f['Número'] <= n_max)]
+        elif n_exato > 0:
+            df_f = df_f[df_f['Número'] == n_exato]
+        if filtrar_area:
+            df_f = df_f[(df_f['Área Construída (m2)'] >= a_min) & (df_f['Área Construída (m2)'] <= a_max)]
         
-        df_filtrado_itbi = dados_itbi.copy()
-        
-        # LÓGICA DE FILTRO CORRIGIDA: Agora busca por contenção de strings
-        nome_ruas_valor = st.session_state.get('nome_rua_input', '')
-        lista_ruas = [rua.strip().upper() for rua in nome_ruas_valor.split('\n') if rua.strip()]
-        if lista_ruas:
-            # Construir uma máscara booleana para buscar por contenção de strings
-            # O '|' (OR) permite buscar por múltiplas strings
-            # O parâmetro na=False garante que valores NaN não causem erro
-            # O case=False garante que a busca seja insensível a maiúsculas/minúsculas
-            ruas_regex = '|'.join(lista_ruas)
-            df_filtrado_itbi = df_filtrado_itbi[df_filtrado_itbi['Nome do Logradouro'].str.contains(ruas_regex, na=False, case=False)]
-
-        if st.session_state.get('busca_range_dynamic_checkbox', False):
-            min_val = st.session_state.get('num_min_form', 0)
-            max_val = st.session_state.get('num_max_form', 10000)
-            if min_val > 0 or max_val < 10000:
-                df_filtrado_itbi = df_filtrado_itbi[(df_filtrado_itbi['Número'] >= min_val) & (df_filtrado_itbi['Número'] <= max_val)]
+        if not df_f.empty:
+            st.session_state.resultado_consulta_itbi = df_f.reset_index(drop=True)
+            df_vis = st.session_state.resultado_consulta_itbi[colunas_base_exibicao].copy()
+            df_vis['Valor de Transação (declarado pelo contribuinte)'] = df_vis['Valor de Transação (declarado pelo contribuinte)'].map('R$ {:,.2f}'.format)
+            df_vis['Valor por m²'] = df_vis['Valor por m²'].map('R$ {:,.2f}'.format)
+            df_vis['Selecionar'] = False
+            st.session_state.df_formatado_itbi = df_vis[['Selecionar'] + colunas_base_exibicao]
         else:
-            exact_val = st.session_state.get('num_exato_form', 0)
-            if exact_val > 0: 
-                df_filtrado_itbi = df_filtrado_itbi[df_filtrado_itbi['Número'] == exact_val]
+            st.warning("Nenhum dado encontrado.")
+            st.session_state.df_formatado_itbi = pd.DataFrame()
 
-        if st.session_state.get('filtrar_area_dynamic_checkbox', False):
-            min_area = st.session_state.get('area_min_form', 0.0)
-            max_area = st.session_state.get('area_max_form', 5000.0)
-            if min_area > 0.0 or max_area < 5000.0:
-                df_filtrado_itbi = df_filtrado_itbi[(df_filtrado_itbi['Área Construída (m2)'] >= min_area) & (df_filtrado_itbi['Área Construída (m2)'] <= max_area)]
-
-        if df_filtrado_itbi.empty:
-            st.warning("Nenhum resultado de ITBI encontrado com os critérios de busca especificados. Por favor, verifique a ortografia do nome das ruas ou ajuste os filtros de número e área.")
-            st.session_state.resultado_consulta_itbi = pd.DataFrame()
-            st.session_state.df_para_exibir_formatado_itbi = pd.DataFrame()
-        else:
-            st.session_state.resultado_consulta_itbi = df_filtrado_itbi.reset_index(drop=True)
-
-            colunas_para_exibir_final = colunas_base_exibicao[:]
-            if 'Complemento' in st.session_state.resultado_consulta_itbi.columns and st.session_state.resultado_consulta_itbi['Complemento'].isnull().all():
-                colunas_para_exibir_final.remove('Complemento')
-
-            df_para_exibir_raw = st.session_state.resultado_consulta_itbi[[col for col in colunas_para_exibir_final if col in st.session_state.resultado_consulta_itbi.columns]].copy()
-            
-            df_para_exibir_formatado_itbi = df_para_exibir_raw.copy()
-            df_para_exibir_formatado_itbi['Valor de Transação (declarado pelo contribuinte)'] = df_para_exibir_formatado_itbi['Valor de Transação (declarado pelo contribuinte)'].map('R$ {:,.2f}'.format)
-            df_para_exibir_formatado_itbi['Valor por m²'] = df_para_exibir_formatado_itbi['Valor por m²'].map('R$ {:,.2f}'.format)
-            
-            # Adicionar a coluna 'Selecionar' e REORDENAR
-            df_para_exibir_formatado_itbi['Selecionar'] = False
-            cols_ordered = ['Selecionar'] + [col for col in df_para_exibir_formatado_itbi.columns if col != 'Selecionar']
-            df_para_exibir_formatado_itbi = df_para_exibir_formatado_itbi[cols_ordered]
-
-            st.session_state.df_para_exibir_formatado_itbi = df_para_exibir_formatado_itbi
-
-# --- Exibição da Tabela de ITBI (Fora do bloco 'if submitted' para que persista) ---
-if 'df_para_exibir_formatado_itbi' in st.session_state and not st.session_state.df_para_exibir_formatado_itbi.empty:
-    st.subheader("Resultados Detalhados do ITBI (Selecione para o PDF ou Comparação)")
-
-    edited_df_itbi = st.data_editor(
-        st.session_state.df_para_exibir_formatado_itbi,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="dynamic",
-        column_config={
-            "Selecionar": st.column_config.CheckboxColumn(
-                "Gerar PDF / Comparar",
-                help="Selecione as linhas para gerar PDFs individuais ou para usar na comparação",
-                default=False,
-            )
-        },
-        key="data_editor_results_itbi"
-    )
+# --- Tabela e Médias ---
+if 'df_formatado_itbi' in st.session_state and not st.session_state.df_formatado_itbi.empty:
+    st.subheader("Resultados Detalhados")
+    edit_itbi = st.data_editor(st.session_state.df_formatado_itbi, use_container_width=True, hide_index=True, key="ed_itbi")
+    sel_itbi = edit_itbi[edit_itbi["Selecionar"]]
     
-    selected_rows_for_action_itbi = edited_df_itbi[edited_df_itbi["Selecionar"]]
+    if not sel_itbi.empty:
+        df_orig = st.session_state.resultado_consulta_itbi.loc[sel_itbi.index]
+        media_val = df_orig['Valor de Transação (declarado pelo contribuinte)'].mean()
+        media_m2 = df_orig['Valor por m²'].mean()
+        
+        st.session_state['sel_pdf_data'] = sel_itbi.drop(columns=['Selecionar'])
+        st.session_state['media_val_pdf'] = media_val
+        st.session_state['media_m2_pdf'] = media_m2
+        
+        st.info(f"**Média Selecionada ({len(sel_itbi)} itens):** R$ {media_m2:,.2f} / m²")
 
-    # Armazena os dados selecionados e suas médias na session_state
-    st.session_state['selected_rows_for_pdf_and_comparison'] = selected_rows_for_action_itbi
-    if not selected_rows_for_action_itbi.empty:
-        selected_indices_original_itbi = selected_rows_for_action_itbi.index
-        df_selecionado_original_itbi = st.session_state.resultado_consulta_itbi.loc[selected_indices_original_itbi]
-        st.session_state['df_selecionado_original_itbi_stored'] = df_selecionado_original_itbi
-
-        media_valor_selecionado_itbi = df_selecionado_original_itbi['Valor de Transação (declarado pelo contribuinte)'].mean()
-        media_valor_m2_selecionado_itbi = df_selecionado_original_itbi['Valor por m²'].mean()
-        st.session_state['media_valor_selecionado_itbi_stored'] = media_valor_selecionado_itbi
-        st.session_state['media_valor_m2_selecionado_itbi_stored'] = media_valor_m2_selecionado_itbi
-
-        st.info(f"**Média dos Itens SELECIONADOS ({len(selected_rows_for_action_itbi)} imóveis de ITBI):**")
-        col_stats_sel1, col_stats_sel2 = st.columns(2)
-        with col_stats_sel1:
-            st.metric(label="Valor de Transação (Selecionados)", value=f"R$ {media_valor_selecionado_itbi:,.2f}")
-        with col_stats_sel2:
-            st.metric(label="Valor por m² (Selecionados)", value=f"R$ {media_valor_m2_selecionado_itbi:,.2f}")
-
-        st.markdown("---") 
-    else:
-        st.warning("Nenhum imóvel selecionado na tabela de ITBI. Selecione um ou mais imóveis para gerar um relatório específico.")
-        # Limpa os dados armazenados se nada estiver selecionado
-        st.session_state['selected_rows_for_pdf_and_comparison'] = pd.DataFrame()
-        st.session_state['df_selecionado_original_itbi_stored'] = pd.DataFrame()
-        st.session_state['media_valor_selecionado_itbi_stored'] = 0.0
-        st.session_state['media_valor_m2_selecionado_itbi_stored'] = 0.0
-
-        if 'resultado_consulta_itbi' in st.session_state and not st.session_state.resultado_consulta_itbi.empty:
-            media_valor_geral_itbi = st.session_state.resultado_consulta_itbi['Valor de Transação (declarado pelo contribuinte)'].mean()
-            media_valor_m2_geral_itbi = st.session_state.resultado_consulta_itbi['Valor por m²'].mean()
-            st.info(f"**Média de TODOS os resultados da consulta de ITBI:**")
-            col_stats_geral1, col_stats_geral2 = st.columns(2)
-            with col_stats_geral1:
-                st.metric(label="Valor de Transação (Geral)", value=f"R$ {media_valor_geral_itbi:,.2f}")
-            with col_stats_geral2:
-                st.metric(label="Valor por m² (Geral)", value=f"R$ {media_valor_m2_geral_itbi:,.2f}")
-        else:
-            st.info("Nenhum dado de consulta de ITBI disponível para calcular médias.")
-
-# --- NOVO: Seção de Comparação de Imóveis ---
+# --- Comparador ---
 st.header("⚖️ Comparação de Imóveis")
+c1, c2, c3 = st.columns(3)
+with c1: log_c = st.text_input("Logradouro:", key="l_c").upper()
+with c2: num_c = st.number_input("Número:", value=0, key="n_c")
+with c3: com_c = st.text_input("Complemento (opcional):", key="c_c").upper()
 
-# Campos para o usuário digitar os detalhes do endereço do imóvel a ser comparado
-col_comp_end1, col_comp_end2, col_comp_end3 = st.columns(3)
-with col_comp_end1:
-    logradouro_comparacao_input = st.text_input("Logradouro:", help="Nome da rua (ex: RUA EXEMPLO)", key="logradouro_comparacao_input").upper()
-with col_comp_end2:
-    numero_comparacao_input = st.number_input("Número:", min_value=0, value=0, step=1, help="Número do imóvel", key="numero_comparacao_input")
-with col_comp_end3:
-    complemento_comparacao_input = st.text_input("Complemento (opcional):", help="Ex: APTO 12, FUNDOS", key="complemento_comparacao_input").upper()
-
-
-area_construida_buscada = None
-if st.button("Buscar Área do Imóvel por Endereço"):
-    if logradouro_comparacao_input and numero_comparacao_input > 0:
-        area_construida_buscada = buscar_area_por_detalhes_endereco(
-            logradouro_comparacao_input, 
-            numero_comparacao_input, 
-            complemento_comparacao_input
-        )
-        if area_construida_buscada is not None:
-            st.success(f"Área Construída encontrada para '{logradouro_comparacao_input}, {numero_comparacao_input} {complemento_comparacao_input}': {area_construida_buscada:,.2f} m²")
-            st.session_state['area_construida_buscada'] = area_construida_buscada
-            # Armazena os detalhes do imóvel buscado para uso no PDF
-            st.session_state['imovel_comparado_detalhes'] = {
-                'logradouro': logradouro_comparacao_input,
-                'numero': numero_comparacao_input,
-                'complemento': complemento_comparacao_input,
-                'area_buscada': area_construida_buscada
-            }
+if st.button("Buscar Área do Imóvel"):
+    if log_c and num_c > 0:
+        ops = buscar_opcoes_imoveis_por_endereco(log_c, num_c, com_c)
+        if ops:
+            st.session_state.ops_imv = ops
+            st.success(f"Encontradas {len(ops)} unidades.")
         else:
-            st.warning(f"Nenhuma Área Construída encontrada para '{logradouro_comparacao_input}, {numero_comparacao_input} {complemento_comparacao_input}'. Tente refinar a busca.")
-            st.session_state['area_construida_buscada'] = 0.0
-            st.session_state['imovel_comparado_detalhes'] = None
-    else:
-        st.error("Por favor, digite o Logradouro e o Número para buscar a área.")
-        st.session_state['area_construida_buscada'] = 0.0
-        st.session_state['imovel_comparado_detalhes'] = None
+            st.warning("Não encontrado.")
+            st.session_state.ops_imv = []
 
-# Recupera a área buscada da session_state (se existir)
-area_construida_comparado_from_search = st.session_state.get('area_construida_buscada', 0.0)
+if st.session_state.get('ops_imv'):
+    l_str = [f"Unidade: {o[0]} | Área: {o[1]:,.2f} m²" for o in st.session_state.ops_imv]
+    escolha = st.selectbox("Selecione a unidade correta:", l_str)
+    d_sel = st.session_state.ops_imv[l_str.index(escolha)]
+    st.session_state['area_comp'] = float(d_sel[1])
+    st.session_state['detalhes_comp'] = {'log': log_c, 'num': num_c, 'compl': d_sel[0], 'area': float(d_sel[1])}
 
-st.markdown("---")
-st.markdown("O valor por m² de referência será a **média dos imóveis de ITBI que você selecionou** na tabela acima.")
+area_atual = st.session_state.get('area_comp', 0.0)
+st.markdown(f"**Área Construída:** `{area_atual:,.2f}` m²")
 
-valor_m2_referencia = 0.0
-imovel_referencia_info = ""
-
-# Lógica para obter o valor de m² de referência (agora simplificada)
-if 'df_para_exibir_formatado_itbi' in st.session_state and not st.session_state.get('selected_rows_for_pdf_and_comparison', pd.DataFrame()).empty:
-    # Pega o valor original não formatado do session_state
-    valor_m2_referencia = st.session_state.get('media_valor_m2_selecionado_itbi_stored', 0.0)
-    imovel_referencia_info = f"Média de **R$ {valor_m2_referencia:,.2f} / m²** dos imóveis de ITBI selecionados."
-    st.success(imovel_referencia_info)
-else:
-    st.warning("Selecione um ou mais imóveis na tabela de ITBI acima para usar este método de comparação.")
-    # Se nenhum imóvel de ITBI for selecionado, o valor de referência será 0.0
-    valor_m2_referencia = 0.0
-    imovel_referencia_info = "N/A (Nenhum imóvel de ITBI selecionado)"
-    
-st.markdown("---")
-
-st.subheader("Dados do Imóvel a Ser Comparado")
-
-# Campo de entrada para a área construída do imóvel a ser comparado
-# Agora, o valor inicial VEM DA BUSCA e NÃO PODE SER ALTERADO MANUALMENTE
-st.markdown(f"**Área Construída do Imóvel (m²):** `{area_construida_comparado_from_search:,.2f}` m²")
-# Usamos o valor diretamente da session_state, sem um number_input editável aqui
-area_construida_para_calculo = area_construida_comparado_from_search
-
-
-if st.button("Calcular Valor Comparativo"):
-    if valor_m2_referencia <= 0:
-        st.error("Por favor, selecione um imóvel de ITBI para obter um Valor por m² de referência válido (> 0).")
-    elif area_construida_para_calculo <= 0:
-        st.error("Por favor, busque a Área Construída do imóvel a ser comparado pelo endereço.")
-    else:
-        # Calcular o valor comparativo (apenas com área construída)
-        valor_comparativo_total = area_construida_para_calculo * valor_m2_referencia
+if st.button("Calcular e Gerar Relatório"):
+    m2_ref = st.session_state.get('media_m2_pdf', 0.0)
+    if m2_ref > 0 and area_atual > 0:
+        val_est = area_atual * m2_ref
+        st.metric("VALOR TOTAL ESTIMADO", f"R$ {val_est:,.2f}")
         
-        st.subheader("Estimativa de Valor Comparativo")
-        st.markdown(f"**Valor por m² de Referência:** {imovel_referencia_info}")
-        st.markdown(f"**Área Construída do Imóvel:** {area_construida_para_calculo:,.2f} m²")
+        # --- Geração de PDF Robusta (Template Original) ---
+        df_pdf = st.session_state.get('sel_pdf_data', pd.DataFrame())
+        tab_html = df_pdf.to_html(index=False, classes='dataframe')
+        det = st.session_state['detalhes_comp']
         
-        st.markdown("---")
-        st.metric(label="**VALOR TOTAL ESTIMADO**", value=f"R$ {valor_comparativo_total:,.2f}", delta_color="off")
-        
-        # Armazena o valor total estimado na session_state para uso no PDF
-        st.session_state['valor_comparativo_total_estimado'] = valor_comparativo_total
-
-        # --- Geração de PDF (MOVIDA PARA AQUI) ---
-        # Recupera os dados armazenados para o PDF
-        selected_rows_for_action_itbi_pdf = st.session_state.get('selected_rows_for_pdf_and_comparison', pd.DataFrame())
-        media_valor_selecionado_itbi_pdf = st.session_state.get('media_valor_selecionado_itbi_stored', 0.0)
-        media_valor_m2_selecionado_itbi_pdf = st.session_state.get('media_valor_m2_selecionado_itbi_stored', 0.0)
-        df_selecionado_original_itbi_pdf = st.session_state.get('df_selecionado_original_itbi_stored', pd.DataFrame())
-
-        if not selected_rows_for_action_itbi_pdf.empty:
-            df_para_pdf_final = selected_rows_for_action_itbi_pdf.copy()
-            if 'Selecionar' in df_para_pdf_final.columns:
-                df_para_pdf_final = df_para_pdf_final.drop(columns=['Selecionar'])
-
-            cols_to_use_in_pdf = colunas_base_exibicao[:]
-            if 'Complemento' in df_para_pdf_final.columns and df_para_pdf_final['Complemento'].isnull().all():
-                 cols_to_use_in_pdf.remove('Complemento')
-
-            df_para_pdf_final = df_para_pdf_final[[col for col in cols_to_use_in_pdf if col in df_para_pdf_final.columns]].copy()
-
-            tabela_html = df_para_pdf_final.to_html(index=False, classes='dataframe', escape=False)
-
-            # Captura os detalhes do imóvel comparado da session_state
-            imovel_comparado_detalhes = st.session_state.get('imovel_comparado_detalhes', {})
-            logradouro_comp_pdf = imovel_comparado_detalhes.get('logradouro', 'N/A').upper()
-            numero_comp_pdf = imovel_comparado_detalhes.get('numero', 0)
-            complemento_comp_pdf = imovel_comparado_detalhes.get('complemento', '').upper()
-            area_buscada_comp_pdf = imovel_comparado_detalhes.get('area_buscada', 0.0)
+        html_doc = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; font-size: 10pt; color: #333; }}
+                h1 {{ color: #2c3e50; border-bottom: 2px solid #eee; }}
+                h2 {{ color: #2980b9; margin-top: 20px; border-bottom: 1px solid #eee; }}
+                .highlight {{ background: #f8f9fa; padding: 15px; border-left: 5px solid #2980b9; margin: 15px 0; }}
+                table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 9pt; }}
+                th {{ background: #f2f2f2; font-weight: bold; }}
+                .footer {{ margin-top: 30px; font-size: 8pt; color: #777; }}
+            </style>
+        </head>
+        <body>
+            <h1>Relatório de Consulta e Comparação de ITBI</h1>
+            <p>Gerado em: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
             
-            valor_m2_ref_comp_pdf = media_valor_m2_selecionado_itbi_pdf # Usa o valor armazenado
-            valor_total_estimado_pdf = st.session_state.get('valor_comparativo_total_estimado', 0.0) # Usa o valor armazenado
+            <h2>Estatísticas da Amostra Selecionada</h2>
+            <div class="highlight">
+                <p><b>Número de Imóveis Comparados:</b> {len(df_pdf)}</p>
+                <p><b>Média do Valor de Transação:</b> R$ {st.session_state['media_val_pdf']:,.2f}</p>
+                <p><b>Média do Valor por m² (Referência):</b> R$ {m2_ref:,.2f}</p>
+            </div>
 
-            # Prepara a lista de ruas para o PDF
-            lista_ruas_para_pdf = [rua.strip().upper() for rua in st.session_state.get('nome_rua_input', '').split('\n') if rua.strip()]
-            ruas_pesquisadas_pdf = ', '.join(lista_ruas_para_pdf) if lista_ruas_para_pdf else 'N/A'
+            <h2>Dados Detalhados dos Itens Selecionados</h2>
+            {tab_html}
 
-            html_content = f"""
-            <!DOCTYPE inhtml>
-            <html>
-            <head>
-                <title>Relatório de Consulta ITBI - Itens Selecionados</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; margin: 20px; font-size: 10pt; }}
-                    h1 {{ color: #333; font-size: 18pt; }}
-                    h2 {{ color: #555; border-bottom: 1px solid #ccc; padding-bottom: 5px; margin-top: 20px; font-size: 14pt; }}
-                    table {{
-                        width: 100%;
-                        border-collapse: collapse;
-                        margin-top: 15px;
-                        table-layout: fixed; 
-                    }}
-                    th, td {{
-                        border: 1px solid #ddd;
-                        padding: 6px; 
-                        text-align: left;
-                        word-wrap: break-word; 
-                        overflow-wrap: break-word; 
-                        font-size: 9pt; 
-                    }}
-                    th {{ background-color: #f2f2f2; }}
-                    .highlight {{ background-color: #e0f2f7; padding: 10px; border-radius: 5px; margin-bottom: 20px; }}
-                    .section-header {{ font-weight: bold; margin-top: 15px; }}
-                    p {{ font-size: 10pt; }} 
-                    /* NOVO: CSS para evitar quebras de linha dentro das células da tabela */
-                    tr {{ page-break-inside: avoid; }} 
-                </style>
-            </head>
-            <body>
-                <h1>Relatório de Consulta de ITBI</h1>
-                <p><strong>Data da Geração:</strong> {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
-
-                <h2>Parâmetros da Consulta</h2>
-                <p><strong>Ruas Pesquisadas:</strong> {ruas_pesquisadas_pdf}</p>
-                <p><strong>Número da Busca:</strong> {"De " + str(st.session_state.get('num_min_form', 0)) + " a " + str(st.session_state.get('num_max_form', 10000)) if st.session_state.get('busca_range_dynamic_checkbox', False) else "Exato: " + str(st.session_state.get('num_exato_form', 0)) if st.session_state.get('num_exato_form', 0) > 0 else "Não informado"}</p>
-                {"<p><strong>Área Construída (m²):</strong> De " + str(st.session_state.get('area_min_form', 0.0)) + " a " + str(st.session_state.get('area_max_form', 5000.0)) + "</p>" if st.session_state.get('filtrar_area_dynamic_checkbox', False) else ""}
-
-                <h2>Estatísticas dos Itens Selecionados</h2>
-                <div class="highlight">
-                    <p><strong>Média do Valor de Transação (Selecionados):</strong> R$ {media_valor_selecionado_itbi_pdf:,.2f}</p>
-                    <p><strong>Média do Valor por m² (Selecionados):</strong> R$ {media_valor_m2_selecionado_itbi_pdf:,.2f}</p>
-                </div>
-
-                <h2>Dados Detalhados dos Itens Selecionados</h2>
-                {tabela_html}
-
-                <!-- NOVO: Seção de Imóvel a Ser Comparado no PDF -->
-                <h2>Imóvel a Ser Comparado</h2>
-                <p><strong>Endereço:</strong> {logradouro_comp_pdf}, {numero_comp_pdf}{' ' + complemento_comp_pdf if complemento_comp_pdf else ''}</p>
-                <p><strong>Área Construída Buscada:</strong> {area_buscada_comp_pdf:,.2f} m²</p>
-                <p><strong>Valor por m² de Referência Utilizado:</strong> R$ {valor_m2_ref_comp_pdf:,.2f}</p>
-                <div class="highlight">
-                    <p><strong>VALOR TOTAL ESTIMADO:</strong> R$ {valor_total_estimado_pdf:,.2f}</p>
-                </div>
-                <!-- FIM da Seção de Imóvel a Ser Comparado no PDF -->
-
-            </body>
-            </html>
-            """
-                
-            pdf_bytes = WeasyHTML(string=html_content).write_pdf()
-
-            st.download_button(
-                label=f"📥 Baixar PDF dos {len(selected_rows_for_action_itbi_pdf)} Itens Selecionados",
-                data=pdf_bytes,
-                file_name="relatorio_itbi_selecionados.pdf",
-                mime="application/pdf",
-                help="Clique para baixar o relatório em PDF com apenas os itens que você selecionou na tabela."
-            )
-        else:
-            st.warning("Nenhum imóvel de ITBI selecionado para inclusão no PDF. Selecione um ou mais imóveis na tabela de ITBI acima.")
-
-
-# --- Observações sobre os dados ---
-if dados_itbi.empty and not submitted and 'df_para_exibir_formatado_itbi' not in st.session_state:
-    st.info("Aguardando sua primeira consulta de ITBI. Verifique se os arquivos de dados estão configurados corretamente.")
-
-# --- Explicação sobre a seleção de itens no PDF (atualizada) ---
-st.sidebar.info(
-    "**Nota sobre o PDF:**\n\n"
-    "O relatório em PDF agora inclui **APENAS os imóveis que você selecionou** na tabela de ITBI. "
-    "Use os checkboxes na tabela para escolher os itens que deseja incluir no relatório."
-)
+            <h2>Imóvel Avaliado</h2>
+            <div class="highlight" style="border-left-color: #27ae60; background: #f0fff4;">
+                <p><b>Endereço:</b> {det['log']}, {det['num']} - {det['compl']}</p>
+                <p><b>Área Construída:</b> {det['area']:,.2f} m²</p>
+                <p><b>Valor por m² Aplicado:</b> R$ {m2_ref:,.2f}</p>
+                <h3 style="margin: 10px 0 0 0;">VALOR TOTAL ESTIMADO: R$ {val_est:,.2f}</h3>
+            </div>
+            
+            <div class="footer">Relatório gerado automaticamente via Sistema de Consulta de ITBI.</div>
+        </body>
+        </html>
+        """
+        pdf_bytes = WeasyHTML(string=html_doc).write_pdf()
+        st.download_button("📥 Baixar Relatório PDF Completo", data=pdf_bytes, file_name="relatorio_itbi_completo.pdf", mime="application/pdf")
+    else:
+        st.error("Selecione os imóveis de ITBI e a unidade de comparação primeiro.")
